@@ -7,9 +7,9 @@ to know.
 Leads
 -----
 
-The Ceph project is led by Sage Weil. In addition, each major project
-component has its own lead. The following table shows all the leads and
-their nicks on `GitHub`_:
+The Ceph project was created by Sage Weil and is led by the Ceph Leadership
+Team (CLT). In addition, each major project component has its own lead. The
+following table shows all the leads and their nicks on `GitHub`_:
 
 .. _github: https://github.com/
 
@@ -21,7 +21,7 @@ RADOS     Neha Ojha        neha-ojha
 RGW       Yehuda Sadeh     yehudasa
 RGW       Matt Benjamin    mattbenjamin
 RBD       Ilya Dryomov     dis 
-CephFS    Patrick Donnelly batrick
+CephFS    Venky Shankar    vshankar
 Dashboard Ernesto Puerta   epuertat
 MON       Joao Luis        jecluis
 Build/Ops Ken Dreyer       ktdreyer
@@ -159,6 +159,10 @@ register an account. Registering gives you a unique IRC identity and allows you
 to access channels where unregistered users have been locked out for technical
 reasons.
 
+See ``the official OFTC (Open and Free Technology Community) documentation's
+registration instructions
+<https://www.oftc.net/Services/#register-your-account>`` to learn how to
+register your IRC account.
 
 Channels
 ~~~~~~~~
