@@ -36,7 +36,8 @@
 #include <sstream>
 
 #define dout_context g_ceph_context
-#define dout_subsys ceph_subsys_rgw
+
+static constexpr auto dout_subsys = ceph_subsys_rgw;
 
 using rgw::ARN;
 using rgw::IAM::Effect;
@@ -167,6 +168,8 @@ rgw_http_errors rgw_http_iam_errors({
 using namespace std;
 using namespace ceph::crypto;
 
+thread_local bool is_asio_thread = false;
+
 rgw_err::
 rgw_err()
 {
@@ -266,8 +269,9 @@ void req_info::rebuild_from(req_info& src)
 }
 
 
-req_state::req_state(CephContext* _cct, RGWEnv* e, uint64_t id)
-  : cct(_cct), info(_cct, e), id(id)
+req_state::req_state(CephContext* _cct, const RGWProcessEnv& penv,
+                     RGWEnv* e, uint64_t id)
+  : cct(_cct), penv(penv), info(_cct, e), id(id)
 {
   enable_ops_log = e->get_enable_ops_log();
   enable_usage_log = e->get_enable_usage_log();
@@ -360,18 +364,17 @@ void set_req_state_err(req_state* s, int err_no)
 
 void dump(req_state* s)
 {
-  if (s->format != RGW_FORMAT_HTML)
+  if (s->format != RGWFormat::HTML)
     s->formatter->open_object_section("Error");
   if (!s->err.err_code.empty())
     s->formatter->dump_string("Code", s->err.err_code);
-  if (!s->err.message.empty())
-    s->formatter->dump_string("Message", s->err.message);
+  s->formatter->dump_string("Message", s->err.message);
   if (!s->bucket_name.empty())	// TODO: connect to expose_bucket
     s->formatter->dump_string("BucketName", s->bucket_name);
   if (!s->trans_id.empty())	// TODO: connect to expose_bucket or another toggle
     s->formatter->dump_string("RequestId", s->trans_id);
   s->formatter->dump_string("HostId", s->host_id);
-  if (s->format != RGW_FORMAT_HTML)
+  if (s->format != RGWFormat::HTML)
     s->formatter->close_section();
 }
 
@@ -1102,7 +1105,8 @@ struct perm_state_from_req_state : public perm_state_base {
   }
 };
 
-Effect eval_or_pass(const boost::optional<Policy>& policy,
+Effect eval_or_pass(const DoutPrefixProvider* dpp,
+		    const boost::optional<Policy>& policy,
 		    const rgw::IAM::Environment& env,
 		    boost::optional<const rgw::auth::Identity&> id,
 		    const uint64_t op,
@@ -1116,13 +1120,14 @@ Effect eval_or_pass(const boost::optional<Policy>& policy,
 
 }
 
-Effect eval_identity_or_session_policies(const vector<Policy>& policies,
+Effect eval_identity_or_session_policies(const DoutPrefixProvider* dpp,
+			  const vector<Policy>& policies,
                           const rgw::IAM::Environment& env,
                           const uint64_t op,
                           const ARN& arn) {
   auto policy_res = Effect::Pass, prev_res = Effect::Pass;
   for (auto& policy : policies) {
-    if (policy_res = eval_or_pass(policy, env, boost::none, op, arn); policy_res == Effect::Deny)
+    if (policy_res = eval_or_pass(dpp, policy, env, boost::none, op, arn); policy_res == Effect::Deny)
       return policy_res;
     else if (policy_res == Effect::Allow)
       prev_res = Effect::Allow;
@@ -1138,15 +1143,16 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
                             const vector<rgw::IAM::Policy>& user_policies,
                             const vector<rgw::IAM::Policy>& session_policies,
                             const rgw::ARN& res,
-                            const uint64_t op)
+                            const uint64_t op,
+                            bool mandatory_policy)
 {
-  auto identity_policy_res = eval_identity_or_session_policies(user_policies, s->env, op, res);
+  auto identity_policy_res = eval_identity_or_session_policies(dpp, user_policies, s->env, op, res);
   if (identity_policy_res == Effect::Deny) {
     return false;
   }
 
   if (! session_policies.empty()) {
-    auto session_policy_res = eval_identity_or_session_policies(session_policies, s->env, op, res);
+    auto session_policy_res = eval_identity_or_session_policies(dpp, session_policies, s->env, op, res);
     if (session_policy_res == Effect::Deny) {
       return false;
     }
@@ -1161,13 +1167,15 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
     return true;
   }
 
-  if (op == rgw::IAM::s3CreateBucket || op == rgw::IAM::s3ListAllMyBuckets) {
-    auto perm = op_to_perm(op);
-
-    return verify_user_permission_no_policy(dpp, s, user_acl, perm);
+  if (mandatory_policy) {
+    // no policies, and policy is mandatory
+    ldpp_dout(dpp, 20) << "no policies for a policy mandatory op " << op << dendl;
+    return false;
   }
 
-  return false;
+  auto perm = op_to_perm(op);
+
+  return verify_user_permission_no_policy(dpp, s, user_acl, perm);
 }
 
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
@@ -1191,10 +1199,11 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             req_state * const s,
                             const rgw::ARN& res,
-                            const uint64_t op)
+                            const uint64_t op,
+                            bool mandatory_policy)
 {
   perm_state_from_req_state ps(s);
-  return verify_user_permission(dpp, &ps, s->user_acl.get(), s->iam_user_policies, s->session_policies, res, op);
+  return verify_user_permission(dpp, &ps, s->user_acl.get(), s->iam_user_policies, s->session_policies, res, op, mandatory_policy);
 }
 
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp, 
@@ -1238,19 +1247,23 @@ bool verify_bucket_permission(const DoutPrefixProvider* dpp,
   if (!verify_requester_payer_permission(s))
     return false;
 
-  auto identity_policy_res = eval_identity_or_session_policies(identity_policies, s->env, op, ARN(bucket));
+  auto identity_policy_res = eval_identity_or_session_policies(dpp, identity_policies, s->env, op, ARN(bucket));
   if (identity_policy_res == Effect::Deny)
     return false;
 
   rgw::IAM::PolicyPrincipal princ_type = rgw::IAM::PolicyPrincipal::Other;
-  auto r = eval_or_pass(bucket_policy, s->env, *s->identity,
+  if (bucket_policy) {
+    ldpp_dout(dpp, 16) << __func__ << ": policy: " << bucket_policy.get()
+		       << "resource: " << ARN(bucket) << dendl;
+  }
+  auto r = eval_or_pass(dpp, bucket_policy, s->env, *s->identity,
 			op, ARN(bucket), princ_type);
   if (r == Effect::Deny)
     return false;
 
   //Take into account session policies, if the identity making a request is a role
   if (!session_policies.empty()) {
-    auto session_policy_res = eval_identity_or_session_policies(session_policies, s->env, op, ARN(bucket));
+    auto session_policy_res = eval_identity_or_session_policies(dpp, session_policies, s->env, op, ARN(bucket));
     if (session_policy_res == Effect::Deny) {
         return false;
     }
@@ -1349,6 +1362,11 @@ bool verify_bucket_permission_no_policy(const DoutPrefixProvider* dpp, req_state
 
 bool verify_bucket_permission(const DoutPrefixProvider* dpp, req_state * const s, const uint64_t op)
 {
+  if (rgw::sal::Bucket::empty(s->bucket)) {
+    // request is missing a bucket name
+    return false;
+  }
+
   perm_state_from_req_state ps(s);
 
   return verify_bucket_permission(dpp, 
@@ -1368,13 +1386,13 @@ bool verify_bucket_permission(const DoutPrefixProvider* dpp, req_state * const s
 int verify_bucket_owner_or_policy(req_state* const s,
 				  const uint64_t op)
 {
-  auto identity_policy_res = eval_identity_or_session_policies(s->iam_user_policies, s->env, op, ARN(s->bucket->get_key()));
+  auto identity_policy_res = eval_identity_or_session_policies(s, s->iam_user_policies, s->env, op, ARN(s->bucket->get_key()));
   if (identity_policy_res == Effect::Deny) {
     return -EACCES;
   }
 
   rgw::IAM::PolicyPrincipal princ_type = rgw::IAM::PolicyPrincipal::Other;
-  auto e = eval_or_pass(s->iam_policy,
+  auto e = eval_or_pass(s, s->iam_policy,
 			s->env, *s->auth.identity,
 			op, ARN(s->bucket->get_key()), princ_type);
   if (e == Effect::Deny) {
@@ -1382,7 +1400,8 @@ int verify_bucket_owner_or_policy(req_state* const s,
   }
 
   if (!s->session_policies.empty()) {
-    auto session_policy_res = eval_identity_or_session_policies(s->session_policies, s->env, op, ARN(s->bucket->get_key()));
+    auto session_policy_res = eval_identity_or_session_policies(s, s->session_policies, s->env, op,
+								ARN(s->bucket->get_key()));
     if (session_policy_res == Effect::Deny) {
         return -EACCES;
     }
@@ -1453,17 +1472,17 @@ bool verify_object_permission(const DoutPrefixProvider* dpp, struct perm_state_b
   if (!verify_requester_payer_permission(s))
     return false;
 
-  auto identity_policy_res = eval_identity_or_session_policies(identity_policies, s->env, op, ARN(obj));
+  auto identity_policy_res = eval_identity_or_session_policies(dpp, identity_policies, s->env, op, ARN(obj));
   if (identity_policy_res == Effect::Deny)
     return false;
 
   rgw::IAM::PolicyPrincipal princ_type = rgw::IAM::PolicyPrincipal::Other;
-  auto r = eval_or_pass(bucket_policy, s->env, *s->identity, op, ARN(obj), princ_type);
+  auto r = eval_or_pass(dpp, bucket_policy, s->env, *s->identity, op, ARN(obj), princ_type);
   if (r == Effect::Deny)
     return false;
 
   if (!session_policies.empty()) {
-    auto session_policy_res = eval_identity_or_session_policies(session_policies, s->env, op, ARN(obj));
+    auto session_policy_res = eval_identity_or_session_policies(dpp, session_policies, s->env, op, ARN(obj));
     if (session_policy_res == Effect::Deny) {
         return false;
     }
@@ -3035,7 +3054,8 @@ rgw_global_init(const std::map<std::string,std::string> *defaults,
   const auto& config_store = g_conf().get_val<std::string>("rgw_backend_store");
 
   if ((config_store == "dbstore") ||
-      (config_store == "motr")) {
+      (config_store == "motr") || 
+      (config_store == "daos")) {
     // These stores don't use the mon
     flags |= CINIT_FLAG_NO_MON_CONFIG;
   }
@@ -3043,3 +3063,13 @@ rgw_global_init(const std::map<std::string,std::string> *defaults,
   // Finish global init, indicating we already ran pre-init
   return global_init(defaults, args, module_type, code_env, flags, false);
 }
+
+void RGWObjVersionTracker::generate_new_write_ver(CephContext *cct)
+{
+  write_version.ver = 1;
+#define TAG_LEN 24
+
+  write_version.tag.clear();
+  append_rand_alpha(cct, write_version.tag, write_version.tag, TAG_LEN);
+}
+

@@ -1925,8 +1925,13 @@ bool Locker::xlock_start(SimpleLock *lock, MDRequestRef& mut)
       }
 
       if (!lock->is_stable() && (lock->get_state() != LOCK_XLOCKDONE ||
-				 lock->get_xlock_by_client() != client ||
-				 lock->is_waiter_for(SimpleLock::WAIT_STABLE)))
+                                lock->get_xlock_by_client() != client ||
+                                lock->is_waiter_for(SimpleLock::WAIT_STABLE)))
+	break;
+      // Avoid unstable XLOCKDONE state reset,
+      // see: https://tracker.ceph.com/issues/49132
+      if (lock->get_state() == LOCK_XLOCKDONE &&
+          lock->get_type() == CEPH_LOCK_IFILE)
 	break;
 
       if (lock->get_state() == LOCK_LOCK || lock->get_state() == LOCK_XLOCKDONE) {
@@ -3563,6 +3568,36 @@ void Locker::kick_cap_releases(MDRequestRef& mdr)
   }
 }
 
+__u32 Locker::get_xattr_total_length(CInode::mempool_xattr_map &xattr)
+{
+  __u32 total = 0;
+
+  for (const auto &p : xattr)
+    total += (p.first.length() + p.second.length());
+  return total;
+}
+
+void Locker::decode_new_xattrs(CInode::mempool_inode *inode,
+			       CInode::mempool_xattr_map *px,
+			       const cref_t<MClientCaps> &m)
+{
+  CInode::mempool_xattr_map tmp;
+
+  auto p = m->xattrbl.cbegin();
+  decode_noshare(tmp, p);
+  __u32 total = get_xattr_total_length(tmp);
+  inode->xattr_version = m->head.xattr_version;
+  if (total > mds->mdsmap->get_max_xattr_size()) {
+    dout(1) << "Maximum xattr size exceeded: " << total
+	    << " max size: " << mds->mdsmap->get_max_xattr_size() << dendl;
+    // Ignore new xattr (!!!) but increase xattr version
+    // XXX how to force the client to drop cached xattrs?
+    inode->xattr_version++;
+  } else {
+    *px = std::move(tmp);
+  }
+}
+
 /**
  * m and ack might be NULL, so don't dereference them unless dirty != 0
  */
@@ -3633,10 +3668,8 @@ void Locker::_do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t foll
   // xattr
   if (xattrs) {
     dout(7) << " xattrs v" << i->xattr_version << " -> " << m->head.xattr_version
-	    << " len " << m->xattrbl.length() << dendl;
-    i->xattr_version = m->head.xattr_version;
-    auto p = m->xattrbl.cbegin();
-    decode(*px, p);
+            << " len " << m->xattrbl.length() << dendl;
+    decode_new_xattrs(i, px, m);
   }
 
   {
@@ -3928,9 +3961,7 @@ bool Locker::_do_cap_update(CInode *in, Capability *cap,
   // xattrs update?
   if (xattr) {
     dout(7) << " xattrs v" << pi.inode->xattr_version << " -> " << m->head.xattr_version << dendl;
-    pi.inode->xattr_version = m->head.xattr_version;
-    auto p = m->xattrbl.cbegin();
-    decode_noshare(*pi.xattrs, p);
+    decode_new_xattrs(pi.inode.get(), pi.xattrs.get(), m);
     wrlock_force(&in->xattrlock, mut);
   }
   
@@ -4033,13 +4064,6 @@ void Locker::_do_cap_release(client_t client, inodeno_t ino, uint64_t cap_id,
     dout(7) << " freezing|frozen, deferring" << dendl;
     in->add_waiter(CInode::WAIT_UNFREEZE,
                   new C_Locker_RetryCapRelease(this, client, ino, cap_id, mseq, seq));
-    return;
-  }
-  if (seq != cap->get_last_issue()) {
-    dout(7) << " issue_seq " << seq << " != " << cap->get_last_issue() << dendl;
-    // clean out any old revoke history
-    cap->clean_revoke_from(seq);
-    eval_cap_gather(in);
     return;
   }
   remove_client_cap(in, cap);

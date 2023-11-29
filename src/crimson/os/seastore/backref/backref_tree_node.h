@@ -26,11 +26,11 @@ struct backref_map_val_t {
     laddr_t laddr,
     extent_types_t type)
     : len(len), laddr(laddr), type(type) {}
+
+  bool operator==(const backref_map_val_t& rhs) const noexcept {
+    return len == rhs.len && laddr == rhs.laddr;
+  }
 };
-WRITE_EQ_OPERATORS_2(
-  backref_map_val_t,
-  len,
-  laddr);
 
 std::ostream& operator<<(std::ostream &out, const backref_map_val_t& val);
 
@@ -67,10 +67,6 @@ public:
   extent_types_t get_type() const final {
     return TYPE;
   }
-
-  bool may_conflict() const final {
-    return false;
-  }
 };
 using BackrefInternalNodeRef = BackrefInternalNode::Ref;
 
@@ -80,7 +76,8 @@ class BackrefLeafNode
       paddr_t, paddr_le_t,
       backref_map_val_t, backref_map_val_le_t,
       BACKREF_NODE_SIZE,
-      BackrefLeafNode> {
+      BackrefLeafNode,
+      false> {
 public:
   template <typename... T>
   BackrefLeafNode(T&&... t) :
@@ -92,14 +89,11 @@ public:
     return TYPE;
   }
 
-  bool may_conflict() const final {
-    return false;
-  }
-
   const_iterator insert(
     const_iterator iter,
     paddr_t key,
-    backref_map_val_t val) final {
+    backref_map_val_t val,
+    LogicalCachedExtent*) final {
     journal_insert(
       iter,
       key,
@@ -110,7 +104,8 @@ public:
 
   void update(
     const_iterator iter,
-    backref_map_val_t val) final {
+    backref_map_val_t val,
+    LogicalCachedExtent*) final {
     return journal_update(
       iter,
       val,
@@ -133,3 +128,10 @@ public:
 using BackrefLeafNodeRef = BackrefLeafNode::Ref;
 
 } // namespace crimson::os::seastore::backref
+
+#if FMT_VERSION >= 90000
+template <> struct fmt::formatter<crimson::os::seastore::backref::backref_map_val_t> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<crimson::os::seastore::backref::BackrefInternalNode> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<crimson::os::seastore::backref::BackrefLeafNode> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<crimson::os::seastore::backref::backref_node_meta_t> : fmt::ostream_formatter {};
+#endif

@@ -601,8 +601,7 @@ function test_auth()
   ceph auth caps client.xx mon 'allow command "osd tree"'
   ceph auth export | grep client.xx
   ceph auth export -o authfile
-  ceph auth import -i authfile 2>$TMPFILE
-  check_response "imported keyring"
+  ceph auth import -i authfile
 
   ceph auth export -o authfile2
   diff authfile authfile2
@@ -759,6 +758,7 @@ function test_mon_misc()
 
   ceph mgr stat
   ceph mgr dump
+  ceph mgr dump | jq -e '.active_clients[0].name'
   ceph mgr module ls
   ceph mgr module enable restful
   expect_false ceph mgr module enable foodne
@@ -1521,10 +1521,10 @@ function test_mon_osd()
 	expect_false ceph osd set $f
 	expect_false ceph osd unset $f
   done
-  ceph osd require-osd-release quincy
+  ceph osd require-osd-release reef
   # can't lower
+  expect_false ceph osd require-osd-release quincy
   expect_false ceph osd require-osd-release pacific
-  expect_false ceph osd require-osd-release octopus
   # these are no-ops but should succeed.
 
   ceph osd set noup

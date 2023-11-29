@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <compare>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -123,7 +124,7 @@ class tree_cursor_t final
   template <bool FORCE_MERGE = false>
   eagain_ifuture<Ref<tree_cursor_t>> erase(context_t, bool get_next);
 
-  MatchKindCMP compare_to(const tree_cursor_t&, value_magic_t) const;
+  std::strong_ordering compare_to(const tree_cursor_t&, value_magic_t) const;
 
   // public to Value
 
@@ -151,7 +152,7 @@ class tree_cursor_t final
   eagain_ifuture<> trim_value(context_t, value_size_t);
 
   static Ref<tree_cursor_t> get_invalid() {
-    static Ref<tree_cursor_t> INVALID = new tree_cursor_t();
+    Ref<tree_cursor_t> INVALID = new tree_cursor_t();
     return INVALID;
   }
 
@@ -274,11 +275,11 @@ class Node
     void validate_input_key(const key_hobj_t& key, value_magic_t magic) const {
 #ifndef NDEBUG
       if (match() == MatchKindBS::EQ) {
-        assert(key.compare_to(p_cursor->get_key_view(magic)) == MatchKindCMP::EQ);
+        assert(key == p_cursor->get_key_view(magic));
       } else {
         assert(match() == MatchKindBS::NE);
         if (p_cursor->is_tracked()) {
-          assert(key.compare_to(p_cursor->get_key_view(magic)) == MatchKindCMP::LT);
+          assert(key < p_cursor->get_key_view(magic));
         } else if (p_cursor->is_end()) {
           // good
         } else {

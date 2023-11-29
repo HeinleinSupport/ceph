@@ -6,15 +6,15 @@ import { Observable, Subscriber } from 'rxjs';
 
 import { RbdService } from '~/app/shared/api/rbd.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
-import { TableStatusViewCache } from '~/app/shared/classes/table-status-view-cache';
+import { TableStatus } from '~/app/shared/classes/table-status';
 import { ConfirmationModalComponent } from '~/app/shared/components/confirmation-modal/confirmation-modal.component';
 import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
 import { TableComponent } from '~/app/shared/datatable/table/table.component';
 import { Icons } from '~/app/shared/enum/icons.enum';
-import { ViewCacheStatus } from '~/app/shared/enum/view-cache-status.enum';
 import { CdTableAction } from '~/app/shared/models/cd-table-action';
 import { CdTableColumn } from '~/app/shared/models/cd-table-column';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { ImageSpec } from '~/app/shared/models/image-spec';
@@ -23,6 +23,7 @@ import { Task } from '~/app/shared/models/task';
 import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
 import { DimlessPipe } from '~/app/shared/pipes/dimless.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { CdTableServerSideService } from '~/app/shared/services/cd-table-server-side.service';
 import { ModalService } from '~/app/shared/services/modal.service';
 import { TaskListService } from '~/app/shared/services/task-list.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
@@ -52,6 +53,8 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
   parentTpl: TemplateRef<any>;
   @ViewChild('nameTpl')
   nameTpl: TemplateRef<any>;
+  @ViewChild('ScheduleTpl', { static: true })
+  ScheduleTpl: TemplateRef<any>;
   @ViewChild('mirroringTpl', { static: true })
   mirroringTpl: TemplateRef<any>;
   @ViewChild('flattenTpl', { static: true })
@@ -64,17 +67,21 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
   provisionedNotAvailableTooltipTpl: TemplateRef<any>;
   @ViewChild('totalProvisionedNotAvailableTooltipTpl', { static: true })
   totalProvisionedNotAvailableTooltipTpl: TemplateRef<any>;
+  @ViewChild('forcePromoteConfirmation', { static: true })
+  forcePromoteConfirmation: TemplateRef<any>;
 
   permission: Permission;
   tableActions: CdTableAction[];
   images: any;
   columns: CdTableColumn[];
   retries: number;
-  tableStatus = new TableStatusViewCache();
+  tableStatus = new TableStatus('light');
   selection = new CdTableSelection();
   icons = Icons;
-
+  count = 0;
+  private tableContext: CdTableFetchDataContext = null;
   modalRef: NgbModalRef;
+  errorMessage: string;
 
   builders = {
     'rbd/create': (metadata: object) =>
@@ -253,6 +260,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         prop: 'size',
         flexGrow: 1,
         cellClass: 'text-right',
+        sortable: false,
         pipe: this.dimlessBinaryPipe
       },
       {
@@ -260,6 +268,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         prop: 'num_objs',
         flexGrow: 1,
         cellClass: 'text-right',
+        sortable: false,
         pipe: this.dimlessPipe
       },
       {
@@ -267,6 +276,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         prop: 'obj_size',
         flexGrow: 1,
         cellClass: 'text-right',
+        sortable: false,
         pipe: this.dimlessBinaryPipe
       },
       {
@@ -275,6 +285,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         cellClass: 'text-center',
         flexGrow: 1,
         pipe: this.dimlessBinaryPipe,
+        sortable: false,
         cellTemplate: this.provisionedNotAvailableTooltipTpl
       },
       {
@@ -283,19 +294,29 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         cellClass: 'text-center',
         flexGrow: 1,
         pipe: this.dimlessBinaryPipe,
+        sortable: false,
         cellTemplate: this.totalProvisionedNotAvailableTooltipTpl
       },
       {
         name: $localize`Parent`,
         prop: 'parent',
         flexGrow: 2,
+        sortable: false,
         cellTemplate: this.parentTpl
       },
       {
         name: $localize`Mirroring`,
         prop: 'mirror_mode',
         flexGrow: 3,
+        sortable: false,
         cellTemplate: this.mirroringTpl
+      },
+      {
+        name: $localize`Next Scheduled Snapshot`,
+        prop: 'mirror_mode',
+        flexGrow: 3,
+        sortable: false,
+        cellTemplate: this.ScheduleTpl
       }
     ];
 
@@ -345,7 +366,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     };
 
     this.taskListService.init(
-      () => this.rbdService.list(),
+      (context) => this.getRbdImages(context),
       (resp) => this.prepareResponse(resp),
       (images) => (this.images = images),
       () => this.onFetchError(),
@@ -357,39 +378,25 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
 
   onFetchError() {
     this.table.reset(); // Disable loading indicator.
-    this.tableStatus = new TableStatusViewCache(ViewCacheStatus.ValueException);
+    this.tableStatus = new TableStatus('danger');
+  }
+
+  getRbdImages(context: CdTableFetchDataContext) {
+    if (context !== null) {
+      this.tableContext = context;
+    }
+    if (this.tableContext == null) {
+      this.tableContext = new CdTableFetchDataContext(() => undefined);
+    }
+    return this.rbdService.list(this.tableContext?.toParams());
   }
 
   prepareResponse(resp: any[]): any[] {
     let images: any[] = [];
-    const viewCacheStatusMap = {};
 
     resp.forEach((pool) => {
-      if (_.isUndefined(viewCacheStatusMap[pool.status])) {
-        viewCacheStatusMap[pool.status] = [];
-      }
-      viewCacheStatusMap[pool.status].push(pool.pool_name);
       images = images.concat(pool.value);
     });
-
-    let status: number;
-    if (viewCacheStatusMap[ViewCacheStatus.ValueException]) {
-      status = ViewCacheStatus.ValueException;
-    } else if (viewCacheStatusMap[ViewCacheStatus.ValueStale]) {
-      status = ViewCacheStatus.ValueStale;
-    } else if (viewCacheStatusMap[ViewCacheStatus.ValueNone]) {
-      status = ViewCacheStatus.ValueNone;
-    }
-
-    if (status) {
-      const statusFor =
-        (viewCacheStatusMap[status].length > 1 ? 'pools ' : 'pool ') +
-        viewCacheStatusMap[status].join();
-
-      this.tableStatus = new TableStatusViewCache(status, statusFor);
-    } else {
-      this.tableStatus = new TableStatusViewCache();
-    }
 
     images.forEach((image) => {
       if (image.schedule_info !== undefined) {
@@ -404,6 +411,11 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       }
     });
 
+    if (images.length > 0) {
+      this.count = CdTableServerSideService.getCount(resp[0]);
+    } else {
+      this.count = 0;
+    }
     return images;
   }
 
@@ -549,6 +561,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
   actionPrimary(primary: boolean) {
     const request = new RbdFormEditRequestModel();
     request.primary = primary;
+    request.features = null;
     const imageSpec = new ImageSpec(
       this.selection.first().pool_name,
       this.selection.first().namespace,
@@ -561,7 +574,32 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         }),
         call: this.rbdService.update(imageSpec, request)
       })
-      .subscribe();
+      .subscribe(
+        () => {},
+        (error) => {
+          error.preventDefault();
+          if (primary) {
+            this.errorMessage = error.error['detail'].replace(/\[.*?\]\s*/, '');
+            request.force = true;
+            this.modalRef = this.modalService.show(ConfirmationModalComponent, {
+              titleText: $localize`Warning`,
+              buttonText: $localize`Enforce`,
+              warning: true,
+              bodyTpl: this.forcePromoteConfirmation,
+              onSubmit: () => {
+                this.rbdService.update(imageSpec, request).subscribe(
+                  () => {
+                    this.modalRef.close();
+                  },
+                  () => {
+                    this.modalRef.close();
+                  }
+                );
+              }
+            });
+          }
+        }
+      );
   }
 
   hasSnapshots() {

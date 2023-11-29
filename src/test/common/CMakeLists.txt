@@ -294,13 +294,18 @@ add_executable(unittest_perf_histogram
 add_ceph_unittest(unittest_perf_histogram)
 target_link_libraries(unittest_perf_histogram ceph-common)
 
+# unittest_perf_cache_key
+add_executable(unittest_perf_counters_key test_perf_counters_key.cc)
+add_ceph_unittest(unittest_perf_counters_key)
+target_link_libraries(unittest_perf_counters_key ceph-common)
+
 # unittest_global_doublefree
 if(WITH_CEPHFS)
   add_executable(unittest_global_doublefree
     test_global_doublefree.cc
     )
   add_ceph_unittest(unittest_global_doublefree)
-  target_link_libraries(unittest_global_doublefree cephfs librados)
+  target_link_libraries(unittest_global_doublefree cephfs librados ceph-common)
 endif(WITH_CEPHFS)
 
 if(NOT WIN32)

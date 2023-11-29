@@ -24,12 +24,15 @@ Tracer::Tracer(opentelemetry::nostd::string_view service_name) {
 void Tracer::init(opentelemetry::nostd::string_view service_name) {
   if (!tracer) {
     opentelemetry::exporter::jaeger::JaegerExporterOptions exporter_options;
-    exporter_options.server_port = 6799;
+    if (g_ceph_context) {
+      exporter_options.server_port = g_ceph_context->_conf.get_val<int64_t>("jaeger_agent_port");
+    }
     const opentelemetry::sdk::trace::BatchSpanProcessorOptions processor_options;
     const auto jaeger_resource = opentelemetry::sdk::resource::Resource::Create(std::move(opentelemetry::sdk::resource::ResourceAttributes{{"service.name", service_name}}));
     auto jaeger_exporter = std::unique_ptr<opentelemetry::sdk::trace::SpanExporter>(new opentelemetry::exporter::jaeger::JaegerExporter(exporter_options));
     auto processor = std::unique_ptr<opentelemetry::sdk::trace::SpanProcessor>(new opentelemetry::sdk::trace::BatchSpanProcessor(std::move(jaeger_exporter), processor_options));
     const auto provider = opentelemetry::nostd::shared_ptr<opentelemetry::trace::TracerProvider>(new opentelemetry::sdk::trace::TracerProvider(std::move(processor), jaeger_resource));
+    opentelemetry::trace::Provider::SetTracerProvider(provider);
     tracer = provider->GetTracer(service_name, OPENTELEMETRY_SDK_VERSION);
   }
 }

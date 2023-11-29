@@ -1,7 +1,7 @@
 import ceph_module  # noqa
 
 from typing import cast, Tuple, Any, Dict, Generic, Optional, Callable, List, \
-    Mapping, NamedTuple, Sequence, Union, TYPE_CHECKING
+    Mapping, NamedTuple, Sequence, Union, Set, TYPE_CHECKING
 if TYPE_CHECKING:
     import sys
     if sys.version_info >= (3, 8):
@@ -342,7 +342,7 @@ def _extract_target_func(
     wrapped = getattr(f, "__wrapped__", None)
     if not wrapped:
         return f, {}
-    extra_args = {}
+    extra_args: Dict[str, Any] = {}
     while wrapped is not None:
         extra_args.update(getattr(f, "extra_args", {}))
         f = wrapped
@@ -379,6 +379,10 @@ class CLICommand(object):
         positional = True
         for index, arg in enumerate(full_argspec.args):
             if arg in cls.KNOWN_ARGS:
+                # record that this function takes an inbuf if it is present
+                # in the full_argspec and not already in the arg_spec
+                if arg == 'inbuf' and 'inbuf' not in arg_spec:
+                    arg_spec['inbuf'] = 'str'
                 continue
             if arg == '_end_positional_':
                 positional = False
@@ -404,7 +408,7 @@ class CLICommand(object):
                 continue
             arg_spec[argname] = argtype
             args.append(CephArgtype.to_argdesc(
-                argtype, dict(name=arg), has_default=True, positional=False
+                argtype, dict(name=argname), has_default=True, positional=False
             ))
         return desc, arg_spec, first_default, ' '.join(args)
 
@@ -435,11 +439,13 @@ class CLICommand(object):
             k, v = key, val
         return kwargs_switch, k.replace('-', '_'), v
 
-    def _collect_args_by_argspec(self, cmd_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _collect_args_by_argspec(self, cmd_dict: Dict[str, Any]) -> Tuple[Dict[str, Any], Set[str]]:
         kwargs = {}
+        special_args = set()
         kwargs_switch = False
         for index, (name, tp) in enumerate(self.arg_spec.items()):
             if name in CLICommand.KNOWN_ARGS:
+                special_args.add(name)
                 continue
             assert self.first_default >= 0
             raw_v = cmd_dict.get(name)
@@ -449,14 +455,20 @@ class CLICommand(object):
             kwargs_switch, k, v = self._get_arg_value(kwargs_switch,
                                                       name, raw_v)
             kwargs[k] = CephArgtype.cast_to(tp, v)
-        return kwargs
+        return kwargs, special_args
 
     def call(self,
              mgr: Any,
              cmd_dict: Dict[str, Any],
              inbuf: Optional[str] = None) -> HandleCommandResult:
-        kwargs = self._collect_args_by_argspec(cmd_dict)
+        kwargs, specials = self._collect_args_by_argspec(cmd_dict)
         if inbuf:
+            if 'inbuf' not in specials:
+                return HandleCommandResult(
+                    -errno.EINVAL,
+                    '',
+                    'Invalid command: Input file data (-i) not supported',
+                )
             kwargs['inbuf'] = inbuf
         assert self.func
         return self.func(mgr, **kwargs)
@@ -885,6 +897,9 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule, MgrModuleLoggingMixin):
             return socket.gethostname()
         return ips[0]
 
+    def get_hostname(self) -> str:
+        return socket.gethostname()
+
     def get_localized_module_option(self, key: str, default: OptionValue = None) -> OptionValue:
         r = self._ceph_get_module_option(key, self.get_mgr_id())
         if r is None:
@@ -1199,6 +1214,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         db.execute('PRAGMA JOURNAL_MODE = PERSIST')
         db.execute('PRAGMA PAGE_SIZE = 65536')
         db.execute('PRAGMA CACHE_SIZE = 64')
+        db.execute('PRAGMA TEMP_STORE = memory')
         db.row_factory = sqlite3.Row
         self.load_schema(db)
 
@@ -1326,6 +1342,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
             addrs = self._rados.get_addrs()
             self._rados.shutdown()
             self._ceph_unregister_client(addrs)
+            self._rados = None
 
     @API.expose
     def get(self, data_name: str) -> Any:
@@ -1564,7 +1581,7 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         :rtype: dict, or None if no metadata found
         """
         metadata = self._ceph_get_metadata(svc_type, svc_id)
-        if metadata is None:
+        if not metadata:
             return default
         return metadata
 
@@ -1636,6 +1653,31 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
 
         self.log.debug("osd_command: '{0}' -> {1} in {2:.3f}s".format(
             cmd_dict['prefix'], r[0], t2 - t1
+        ))
+
+        return r
+
+    def tell_command(self, daemon_type: str, daemon_id: str, cmd_dict: dict, inbuf: Optional[str] = None) -> Tuple[int, str, str]:
+        """
+        Helper for `ceph tell` command execution.
+
+        See send_command for general case.
+
+        :param dict cmd_dict: expects a prefix i.e.:
+            cmd_dict = {
+                'prefix': 'heap',
+                'heapcmd': 'stats',
+            }
+        :return: status int, out std, err str
+        """
+        t1 = time.time()
+        result = CommandResult()
+        self.send_command(result, daemon_type, daemon_id, json.dumps(cmd_dict), "", inbuf)
+        r = result.wait()
+        t2 = time.time()
+
+        self.log.debug("tell_command on {0}.{1}: '{2}' -> {3} in {4:.5f}s".format(
+            daemon_type, daemon_id, cmd_dict['prefix'], r[0], t2 - t1
         ))
 
         return r
@@ -1779,6 +1821,10 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
             self._mgr_ips = ips[0]
         assert self._mgr_ips is not None
         return self._mgr_ips
+
+    @API.expose
+    def get_hostname(self) -> str:
+        return socket.gethostname()
 
     @API.expose
     def get_ceph_option(self, key: str) -> OptionValue:
@@ -2249,6 +2295,13 @@ class MgrModule(ceph_module.BaseMgrModule, MgrModuleLoggingMixin):
         :param int query_id: query ID
         """
         return self._ceph_get_mds_perf_counters(query_id)
+
+    def get_daemon_health_metrics(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get the list of health metrics per daemon. This includes SLOW_OPS health metrics
+        in MON and OSD daemons, and PENDING_CREATING_PGS health metrics for OSDs.
+        """
+        return self._ceph_get_daemon_health_metrics()
 
     def is_authorized(self, arguments: Dict[str, str]) -> bool:
         """

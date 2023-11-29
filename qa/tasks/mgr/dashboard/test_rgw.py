@@ -467,6 +467,7 @@ class RgwDaemonTest(RgwTestCase):
         self.assertIn('server_hostname', data)
         self.assertIn('zonegroup_name', data)
         self.assertIn('zone_name', data)
+        self.assertIn('port', data)
 
     def test_get(self):
         data = self._get('/api/rgw/daemon')
@@ -804,7 +805,7 @@ class RgwUserSubuserTest(RgwTestCase):
                 'access': 'readwrite',
                 'key_type': 'swift'
             })
-        self.assertStatus(201)
+        self.assertStatus(200)
         data = self.jsonBody()
         subuser = self.find_object_in_list('id', 'teuth-test-user:tux', data)
         self.assertIsInstance(subuser, object)
@@ -827,7 +828,7 @@ class RgwUserSubuserTest(RgwTestCase):
                 'access_key': 'yyy',
                 'secret_key': 'xxx'
             })
-        self.assertStatus(201)
+        self.assertStatus(200)
         data = self.jsonBody()
         subuser = self.find_object_in_list('id', 'teuth-test-user:hugo', data)
         self.assertIsInstance(subuser, object)

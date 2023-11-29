@@ -226,6 +226,12 @@ namespace rgw::sal {
     return ret;
   }
 
+  int DBUser::verify_mfa(const std::string& mfa_str, bool* verified, const DoutPrefixProvider *dpp, optional_yield y)
+  {
+    *verified = false;
+    return 0;
+  }
+
   int DBBucket::remove_bucket(const DoutPrefixProvider *dpp, bool delete_children, bool forward_to_master, req_info* req_info, optional_yield y)
   {
     int ret;
@@ -315,13 +321,11 @@ namespace rgw::sal {
     return 0;
   }
 
-  int DBBucket::chown(const DoutPrefixProvider *dpp, User* new_user, User* old_user, optional_yield y, const std::string* marker)
+  int DBBucket::chown(const DoutPrefixProvider *dpp, User& new_user, optional_yield y)
   {
     int ret;
 
-    ret = store->getDB()->update_bucket(dpp, "owner", info, false, &(new_user->get_id()), nullptr, nullptr, nullptr);
-
-    /* XXX: Update policies of all the bucket->objects with new user */
+    ret = store->getDB()->update_bucket(dpp, "owner", info, false, &(new_user.get_id()), nullptr, nullptr, nullptr);
     return ret;
   }
 
@@ -540,25 +544,14 @@ namespace rgw::sal {
     return *zonegroup;
   }
 
-  int DBZone::get_zonegroup(const std::string& id, std::unique_ptr<ZoneGroup>* zg)
-  {
-    /* XXX: for now only one zonegroup supported */
-    ZoneGroup* group = new DBZoneGroup(store, std::make_unique<RGWZoneGroup>());
-    if (!group)
-      return -ENOMEM;
-
-    zg->reset(group);
-    return 0;
-  }
-
   const RGWZoneParams& DBZone::get_rgw_params()
   {
     return *zone_params;
   }
 
-  const rgw_zone_id& DBZone::get_id()
+  const std::string& DBZone::get_id()
   {
-    return cur_zone_id;
+    return zone_params->get_id();
   }
 
 
@@ -602,9 +595,14 @@ namespace rgw::sal {
     return realm->get_id();
   }
 
-  std::unique_ptr<LuaScriptManager> DBStore::get_lua_script_manager()
+  RGWBucketSyncPolicyHandlerRef DBZone::get_sync_policy_handler()
   {
-    return std::make_unique<DBLuaScriptManager>(this);
+    return nullptr;
+  }
+
+  std::unique_ptr<LuaManager> DBStore::get_lua_manager()
+  {
+    return std::make_unique<DBLuaManager>(this);
   }
 
   int DBObject::get_obj_state(const DoutPrefixProvider* dpp, RGWObjState **pstate, optional_yield y, bool follow_olh)
@@ -632,7 +630,7 @@ namespace rgw::sal {
 
   int DBObject::read_attrs(const DoutPrefixProvider* dpp, DB::Object::Read &read_op, optional_yield y, rgw_obj* target_obj)
   {
-    read_op.params.attrs = &attrs;
+    read_op.params.attrs = &state.attrset;
     read_op.params.target_obj = target_obj;
     read_op.params.obj_size = &state.size;
     read_op.params.lastmod = &state.mtime;
@@ -664,8 +662,8 @@ namespace rgw::sal {
       return r;
     }
     set_atomic();
-    attrs[attr_name] = attr_val;
-    return set_obj_attrs(dpp, &attrs, nullptr, y);
+    state.attrset[attr_name] = attr_val;
+    return set_obj_attrs(dpp, &state.attrset, nullptr, y);
   }
 
   int DBObject::delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y)
@@ -688,23 +686,6 @@ namespace rgw::sal {
   }
 
 
-  int DBObject::omap_get_vals(const DoutPrefixProvider *dpp, const std::string& marker, uint64_t count,
-      std::map<std::string, bufferlist> *m,
-      bool* pmore, optional_yield y)
-  {
-    DB::Object op_target(store->getDB(),
-        get_bucket()->get_info(), get_obj());
-    return op_target.obj_omap_get_vals(dpp, marker, count, m, pmore);
-  }
-
-  int DBObject::omap_get_all(const DoutPrefixProvider *dpp, std::map<std::string, bufferlist> *m,
-      optional_yield y)
-  {
-    DB::Object op_target(store->getDB(),
-        get_bucket()->get_info(), get_obj());
-    return op_target.obj_omap_get_all(dpp, m);
-  }
-
   int DBObject::omap_get_vals_by_keys(const DoutPrefixProvider *dpp, const std::string& oid,
       const std::set<std::string>& keys,
       Attrs* vals)
@@ -722,9 +703,15 @@ namespace rgw::sal {
     return op_target.obj_omap_set_val_by_key(dpp, key, val, must_exist);
   }
 
-  MPSerializer* DBObject::get_serializer(const DoutPrefixProvider *dpp, const std::string& lock_name)
+  int DBObject::chown(User& new_user, const DoutPrefixProvider* dpp, optional_yield y)
   {
-    return new MPDBSerializer(dpp, store, this, lock_name);
+    return 0;
+  }
+
+  std::unique_ptr<MPSerializer> DBObject::get_serializer(const DoutPrefixProvider *dpp,
+							 const std::string& lock_name)
+  {
+    return std::make_unique<MPDBSerializer>(dpp, store, this, lock_name);
   }
 
   int DBObject::transition(Bucket* bucket,
@@ -734,19 +721,9 @@ namespace rgw::sal {
       const DoutPrefixProvider* dpp,
       optional_yield y)
   {
-    return 0;
-  }
-
-  int DBObject::transition_to_cloud(Bucket* bucket,
-			   rgw::sal::PlacementTier* tier,
-			   rgw_bucket_dir_entry& o,
-			   std::set<std::string>& cloud_targets,
-			   CephContext* cct,
-			   bool update_object,
-			   const DoutPrefixProvider* dpp,
-			   optional_yield y)
-  {
-    return 0;
+    DB::Object op_target(store->getDB(),
+        get_bucket()->get_info(), get_obj());
+    return op_target.transition(dpp, placement_rule, mtime, olh_epoch);
   }
 
   bool DBObject::placement_rules_match(rgw_placement_rule& r1, rgw_placement_rule& r2)
@@ -859,14 +836,6 @@ namespace rgw::sal {
     del_op.params.versioning_status = bucket->get_info().versioning_status();
 
     return del_op.delete_obj(dpp);
-  }
-
-  int DBObject::delete_obj_aio(const DoutPrefixProvider* dpp, RGWObjState* astate,
-      Completions* aio, bool keep_index_consistent,
-      optional_yield y)
-  {
-    /* XXX: Make it async */
-    return 0;
   }
 
   int DBObject::copy_object(User* user,
@@ -1146,6 +1115,7 @@ namespace rgw::sal {
 
     obj_op.meta.owner = owner.get_id();
     obj_op.meta.flags = PUT_OBJ_CREATE;
+    obj_op.meta.category = RGWObjCategory::Main;
     obj_op.meta.modify_tail = true;
     obj_op.meta.completeMultipart = true;
 
@@ -1232,36 +1202,36 @@ namespace rgw::sal {
   std::unique_ptr<Writer> DBMultipartUpload::get_writer(
 				  const DoutPrefixProvider *dpp,
 				  optional_yield y,
-				  std::unique_ptr<rgw::sal::Object> _head_obj,
+				  rgw::sal::Object* obj,
 				  const rgw_user& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  uint64_t part_num,
 				  const std::string& part_num_str)
   {
-    return std::make_unique<DBMultipartWriter>(dpp, y, this,
-				 std::move(_head_obj), store, owner,
+    return std::make_unique<DBMultipartWriter>(dpp, y, this, obj, store, owner,
 				 ptail_placement_rule, part_num, part_num_str);
   }
 
   DBMultipartWriter::DBMultipartWriter(const DoutPrefixProvider *dpp,
 	    	    optional_yield y,
                 MultipartUpload* upload,
-		        std::unique_ptr<rgw::sal::Object> _head_obj,
-		        DBStore* _store,
+		        rgw::sal::Object* obj,
+		        DBStore* _driver,
     		    const rgw_user& _owner,
 	    	    const rgw_placement_rule *_ptail_placement_rule,
                 uint64_t _part_num, const std::string& _part_num_str):
-    			Writer(dpp, y),
-	    		store(_store),
+			StoreWriter(dpp, y),
+			store(_driver),
                 owner(_owner),
                 ptail_placement_rule(_ptail_placement_rule),
-                head_obj(std::move(_head_obj)),
+                head_obj(obj),
                 upload_id(upload->get_upload_id()),
+                part_num(_part_num),
                 oid(head_obj->get_name() + "." + upload_id +
                     "." + std::to_string(part_num)),
                 meta_obj(((DBMultipartUpload*)upload)->get_meta_obj()),
-                op_target(_store->getDB(), head_obj->get_bucket()->get_info(), head_obj->get_obj(), upload_id),
-                parent_op(&op_target), part_num(_part_num),
+                op_target(_driver->getDB(), head_obj->get_bucket()->get_info(), head_obj->get_obj(), upload_id),
+                parent_op(&op_target),
                 part_num_str(_part_num_str) {}
 
   int DBMultipartWriter::prepare(optional_yield y)
@@ -1394,20 +1364,20 @@ namespace rgw::sal {
 
   DBAtomicWriter::DBAtomicWriter(const DoutPrefixProvider *dpp,
 	    	    optional_yield y,
-		        std::unique_ptr<rgw::sal::Object> _head_obj,
-		        DBStore* _store,
+		        rgw::sal::Object* _obj,
+		        DBStore* _driver,
     		    const rgw_user& _owner,
 	    	    const rgw_placement_rule *_ptail_placement_rule,
 		        uint64_t _olh_epoch,
 		        const std::string& _unique_tag) :
-    			Writer(dpp, y),
-	    		store(_store),
+			StoreWriter(dpp, y),
+			store(_driver),
                 owner(_owner),
                 ptail_placement_rule(_ptail_placement_rule),
                 olh_epoch(_olh_epoch),
                 unique_tag(_unique_tag),
-                obj(_store, _head_obj->get_key(), _head_obj->get_bucket()),
-                op_target(_store->getDB(), obj.get_bucket()->get_info(), obj.get_obj()),
+                obj(_driver, _obj->get_key(), _obj->get_bucket()),
+                op_target(_driver->getDB(), obj.get_bucket()->get_info(), obj.get_obj()),
                 parent_op(&op_target) {}
 
   int DBAtomicWriter::prepare(optional_yield y)
@@ -1523,6 +1493,7 @@ namespace rgw::sal {
     parent_op.meta.if_nomatch = if_nomatch;
     parent_op.meta.user_data = user_data;
     parent_op.meta.zones_trace = zones_trace;
+    parent_op.meta.category = RGWObjCategory::Main;
     
     /* XXX: handle accounted size */
     accounted_size = total_data_size;
@@ -1582,7 +1553,7 @@ namespace rgw::sal {
 
   std::unique_ptr<Writer> DBStore::get_append_writer(const DoutPrefixProvider *dpp,
 				  optional_yield y,
-				  std::unique_ptr<rgw::sal::Object> _head_obj,
+				  rgw::sal::Object* obj,
 				  const rgw_user& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  const std::string& unique_tag,
@@ -1593,13 +1564,12 @@ namespace rgw::sal {
 
   std::unique_ptr<Writer> DBStore::get_atomic_writer(const DoutPrefixProvider *dpp,
 				  optional_yield y,
-				  std::unique_ptr<rgw::sal::Object> _head_obj,
+				  rgw::sal::Object* obj,
 				  const rgw_user& owner,
 				  const rgw_placement_rule *ptail_placement_rule,
 				  uint64_t olh_epoch,
 				  const std::string& unique_tag) {
-    return std::make_unique<DBAtomicWriter>(dpp, y,
-                    std::move(_head_obj), this, owner,
+    return std::make_unique<DBAtomicWriter>(dpp, y, obj, this, owner,
                     ptail_placement_rule, olh_epoch, unique_tag);
   }
 
@@ -1609,7 +1579,9 @@ namespace rgw::sal {
 
   bool DBStore::valid_placement(const rgw_placement_rule& rule)
   {
-    return zone.get_rgw_params().valid_placement(rule);
+    // XXX: Till zonegroup, zone and storage-classes can be configured
+    // for dbstore return true
+    return true; //zone.get_rgw_params().valid_placement(rule);
   }
 
   std::unique_ptr<User> DBStore::get_user(const rgw_user &u)
@@ -1750,6 +1722,24 @@ namespace rgw::sal {
     return "";
   }
 
+  int DBStore::get_zonegroup(const std::string& id, std::unique_ptr<ZoneGroup>* zg)
+  {
+    /* XXX: for now only one zonegroup supported */
+    ZoneGroup* group = new DBZoneGroup(this, std::make_unique<RGWZoneGroup>());
+    if (!group)
+      return -ENOMEM;
+
+    zg->reset(group);
+    return 0;
+  }
+
+  int DBStore::list_all_zones(const DoutPrefixProvider* dpp,
+			      std::list<std::string>& zone_ids)
+  {
+    zone_ids.push_back(zone.get_id());
+    return 0;
+  }
+
   int DBStore::cluster_stat(RGWClusterStat& stats)
   {
     return 0;
@@ -1760,57 +1750,55 @@ namespace rgw::sal {
     return std::make_unique<DBLifecycle>(this);
   }
 
-  std::unique_ptr<Completions> DBStore::get_completions(void)
-  {
-    return 0;
-  }
-
   int DBLifecycle::get_entry(const std::string& oid, const std::string& marker,
-			      LCEntry& entry)
+			      std::unique_ptr<LCEntry>* entry)
   {
     return store->getDB()->get_entry(oid, marker, entry);
   }
 
-  int DBLifecycle::get_next_entry(const std::string& oid, std::string& marker,
-				   LCEntry& entry)
+  int DBLifecycle::get_next_entry(const std::string& oid, const std::string& marker,
+				  std::unique_ptr<LCEntry>* entry)
   {
     return store->getDB()->get_next_entry(oid, marker, entry);
   }
 
-  int DBLifecycle::set_entry(const std::string& oid, const LCEntry& entry)
+  int DBLifecycle::set_entry(const std::string& oid, LCEntry& entry)
   {
     return store->getDB()->set_entry(oid, entry);
   }
 
   int DBLifecycle::list_entries(const std::string& oid, const std::string& marker,
-  				 uint32_t max_entries, vector<LCEntry>& entries)
+  				 uint32_t max_entries, vector<std::unique_ptr<LCEntry>>& entries)
   {
     return store->getDB()->list_entries(oid, marker, max_entries, entries);
   }
 
-  int DBLifecycle::rm_entry(const std::string& oid, const LCEntry& entry)
+  int DBLifecycle::rm_entry(const std::string& oid, LCEntry& entry)
   {
     return store->getDB()->rm_entry(oid, entry);
   }
 
-  int DBLifecycle::get_head(const std::string& oid, LCHead& head)
+  int DBLifecycle::get_head(const std::string& oid, std::unique_ptr<LCHead>* head)
   {
     return store->getDB()->get_head(oid, head);
   }
 
-  int DBLifecycle::put_head(const std::string& oid, const LCHead& head)
+  int DBLifecycle::put_head(const std::string& oid, LCHead& head)
   {
     return store->getDB()->put_head(oid, head);
   }
 
-  LCSerializer* DBLifecycle::get_serializer(const std::string& lock_name, const std::string& oid, const std::string& cookie)
+  std::unique_ptr<LCSerializer> DBLifecycle::get_serializer(const std::string& lock_name,
+							    const std::string& oid,
+							    const std::string& cookie)
   {
-    return new LCDBSerializer(store, oid, lock_name, cookie);
+    return std::make_unique<LCDBSerializer>(store, oid, lock_name, cookie);
   }
 
   std::unique_ptr<Notification> DBStore::get_notification(
     rgw::sal::Object* obj, rgw::sal::Object* src_obj, req_state* s,
-    rgw::notify::EventType event_type, const std::string* object_name)
+    rgw::notify::EventType event_type, optional_yield y,
+    const std::string* object_name)
   {
     return std::make_unique<DBNotification>(obj, src_obj, event_type);
   }
@@ -1972,33 +1960,58 @@ namespace rgw::sal {
 
     return ret;
   }
+
+  int DBLuaManager::get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script)
+  {
+    return -ENOENT;
+  }
+
+  int DBLuaManager::put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script)
+  {
+    return -ENOENT;
+  }
+
+  int DBLuaManager::del_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key)
+  {
+    return -ENOENT;
+  }
+
+  int DBLuaManager::add_package(const DoutPrefixProvider* dpp, optional_yield y, const std::string& package_name)
+  {
+    return -ENOENT;
+  }
+
+  int DBLuaManager::remove_package(const DoutPrefixProvider* dpp, optional_yield y, const std::string& package_name)
+  {
+    return -ENOENT;
+  }
+
+  int DBLuaManager::list_packages(const DoutPrefixProvider* dpp, optional_yield y, rgw::lua::packages_t& packages)
+  {
+    return -ENOENT;
+  }
 } // namespace rgw::sal
 
 extern "C" {
 
   void *newDBStore(CephContext *cct)
   {
-    rgw::sal::DBStore *store = new rgw::sal::DBStore();
-    if (store) {
-      DBStoreManager *dbsm = new DBStoreManager(cct);
+    rgw::sal::DBStore *driver = new rgw::sal::DBStore();
+    DBStoreManager *dbsm = new DBStoreManager(cct);
 
-      if (!dbsm ) {
-        delete store; store = nullptr;
-      }
-
-      DB *db = dbsm->getDB();
-      if (!db) {
-        delete dbsm;
-        delete store; store = nullptr;
-      }
-
-      store->setDBStoreManager(dbsm);
-      store->setDB(db);
-      db->set_store((rgw::sal::Store*)store);
-      db->set_context(cct);
+    DB *db = dbsm->getDB();
+    if (!db) {
+      delete dbsm;
+      delete driver;
+      return nullptr;
     }
 
-    return store;
+    driver->setDBStoreManager(dbsm);
+    driver->setDB(db);
+    db->set_driver((rgw::sal::Driver*)driver);
+    db->set_context(cct);
+
+    return driver;
   }
 
 }

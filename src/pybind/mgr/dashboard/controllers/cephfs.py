@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
 from collections import defaultdict
 
@@ -18,6 +19,8 @@ GET_QUOTAS_SCHEMA = {
     'max_bytes': (int, ''),
     'max_files': (int, '')
 }
+
+logger = logging.getLogger("controllers.rgw")
 
 
 @APIRouter('/cephfs', Scope.CEPHFS)
@@ -328,8 +331,9 @@ class CephFS(RESTController):
             raise cherrypy.HTTPError(404,
                                      "Client {0} does not exist in cephfs {1}".format(client_id,
                                                                                       fs_id))
+        filters = [f'id={client_id}']
         CephService.send_command('mds', 'client evict',
-                                 srv_spec='{0}:0'.format(fs_id), id=client_id)
+                                 srv_spec='{0}:0'.format(fs_id), filters=filters)
 
     @staticmethod
     def _cephfs_instance(fs_id):
@@ -470,6 +474,14 @@ class CephFS(RESTController):
         :rtype: str
         """
         cfs = self._cephfs_instance(fs_id)
+        list_snaps = cfs.ls_snapshots(path)
+        for snap in list_snaps:
+            if name == snap['name']:
+                raise DashboardException(code='Snapshot name already in use',
+                                         msg='Snapshot name {} is already in use.'
+                                         'Please use another name'.format(name),
+                                         component='cephfs')
+
         return cfs.mk_snapshot(path, name)
 
     @RESTController.Resource('DELETE', path='/snapshot')

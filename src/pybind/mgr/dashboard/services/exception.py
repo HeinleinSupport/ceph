@@ -34,7 +34,7 @@ def serialize_dashboard_exception(e, include_http_status=False, task=None):
     component = getattr(e, 'component', None)
     out['component'] = component if component else None
     if include_http_status:
-        out['status'] = getattr(e, 'status', 500)
+        out['status'] = getattr(e, 'status', 500)  # type: ignore
     if task:
         out['task'] = dict(name=task.name, metadata=task.metadata)  # type: ignore
     return out
@@ -45,15 +45,14 @@ def dashboard_exception_handler(handler, *args, **kwargs):
     try:
         with handle_rados_error(component=None):  # make the None controller the fallback.
             return handler(*args, **kwargs)
-    # Don't catch cherrypy.* Exceptions.
+    # pylint: disable=try-except-raise
+    except (cherrypy.HTTPRedirect, cherrypy.NotFound, cherrypy.HTTPError):
+        raise
     except (ViewCacheNoDataException, DashboardException) as error:
         logger.exception('Dashboard Exception')
         cherrypy.response.headers['Content-Type'] = 'application/json'
         cherrypy.response.status = getattr(error, 'status', 400)
         return json.dumps(serialize_dashboard_exception(error)).encode('utf-8')
-    except cherrypy.HTTPRedirect:
-        # No internal errors
-        raise
     except Exception as error:
         logger.exception('Internal Server Error')
         raise error
@@ -122,4 +121,12 @@ def handle_error(component, http_status_code=None):
     try:
         yield
     except Exception as e:  # pylint: disable=broad-except
+        raise DashboardException(e, component=component, http_status_code=http_status_code)
+
+
+@contextmanager
+def handle_custom_error(component, http_status_code=None, exceptions=()):
+    try:
+        yield
+    except exceptions as e:
         raise DashboardException(e, component=component, http_status_code=http_status_code)

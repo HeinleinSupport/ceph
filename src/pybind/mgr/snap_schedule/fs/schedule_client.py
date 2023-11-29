@@ -193,6 +193,7 @@ class SnapSchedClient(CephfsClient):
             db.execute('PRAGMA JOURNAL_MODE = PERSIST')
             db.execute('PRAGMA PAGE_SIZE = 65536')
             db.execute('PRAGMA CACHE_SIZE = 256')
+            db.execute('PRAGMA TEMP_STORE = memory')
             db.row_factory = sqlite3.Row
             # check for legacy dump store
             pool_param = cast(Union[int, str], poolid)
@@ -201,7 +202,7 @@ class SnapSchedClient(CephfsClient):
                     size, _mtime = ioctx.stat(SNAP_DB_OBJECT_NAME)
                     dump = ioctx.read(SNAP_DB_OBJECT_NAME, size).decode('utf-8')
                     db.executescript(dump)
-                    ioctx.remove(SNAP_DB_OBJECT_NAME)
+                    ioctx.remove_object(SNAP_DB_OBJECT_NAME)
                 except rados.ObjectNotFound:
                     log.debug(f'No legacy schedule DB found in {fs}')
             db.executescript(Schedule.CREATE_TABLES)
@@ -275,6 +276,7 @@ class SnapSchedClient(CephfsClient):
                                   start: str,
                                   repeat: str) -> None:
         log.debug(f'Scheduled snapshot of {path} triggered')
+        set_schedule_to_inactive = False
         try:
             with self.get_schedule_db(fs_name) as conn_mgr:
                 db = conn_mgr.dbinfo.db
@@ -287,18 +289,28 @@ class SnapSchedClient(CephfsClient):
                     time = datetime.now(timezone.utc)
                     with open_filesystem(self, fs_name) as fs_handle:
                         snap_ts = time.strftime(SNAPSHOT_TS_FORMAT_TZ)
-                        snap_name = f'{path}/.snap/{SNAPSHOT_PREFIX}-{snap_ts}'
+                        snap_dir = self.mgr.rados.conf_get('client_snapdir')
+                        snap_name = f'{path}/{snap_dir}/{SNAPSHOT_PREFIX}-{snap_ts}'
                         fs_handle.mkdir(snap_name, 0o755)
                     log.info(f'created scheduled snapshot of {path}')
                     log.debug(f'created scheduled snapshot {snap_name}')
                     sched.update_last(time, db)
+                except cephfs.ObjectNotFound:
+                    # maybe path is missing or wrong
+                    self._log_exception('create_scheduled_snapshot')
+                    log.debug(f'path {path} is probably missing or wrong; '
+                              'remember to strip off the mount point path '
+                              'prefix to provide the correct path')
+                    set_schedule_to_inactive = True
                 except cephfs.Error:
                     self._log_exception('create_scheduled_snapshot')
-                    sched.set_inactive(db)
                 except Exception:
                     # catch all exceptions cause otherwise we'll never know since this
                     # is running in a thread
                     self._log_exception('create_scheduled_snapshot')
+                finally:
+                    if set_schedule_to_inactive:
+                        sched.set_inactive(db)
         finally:
             with self.get_schedule_db(fs_name) as conn_mgr:
                 db = conn_mgr.dbinfo.db
@@ -313,7 +325,8 @@ class SnapSchedClient(CephfsClient):
             prune_candidates = set()
             time = datetime.now(timezone.utc)
             with open_filesystem(self, sched.fs) as fs_handle:
-                with fs_handle.opendir(f'{path}/.snap') as d_handle:
+                snap_dir = self.mgr.rados.conf_get('client_snapdir')
+                with fs_handle.opendir(f'{path}/{snap_dir}') as d_handle:
                     dir_ = fs_handle.readdir(d_handle)
                     while dir_:
                         if dir_.d_name.decode('utf-8').startswith(f'{SNAPSHOT_PREFIX}-'):
@@ -328,7 +341,7 @@ class SnapSchedClient(CephfsClient):
                 for k in to_prune:
                     dirname = k[0].d_name.decode('utf-8')
                     log.debug(f'rmdir on {dirname}')
-                    fs_handle.rmdir(f'{path}/.snap/{dirname}')
+                    fs_handle.rmdir(f'{path}/{snap_dir}/{dirname}')
                 if to_prune:
                     with self.get_schedule_db(sched.fs) as conn_mgr:
                         db = conn_mgr.dbinfo.db

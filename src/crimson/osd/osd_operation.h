@@ -36,7 +36,6 @@ struct ConnectionPipeline {
 enum class OperationTypeCode {
   client_request = 0,
   peering_event,
-  compound_peering_request,
   pg_advance_map,
   pg_creation,
   replicated_request,
@@ -46,13 +45,14 @@ enum class OperationTypeCode {
   historic_client_request,
   logmissing_request,
   logmissing_request_reply,
+  snaptrim_event,
+  snaptrimobj_subevent,
   last_op
 };
 
 static constexpr const char* const OP_NAMES[] = {
   "client_request",
   "peering_event",
-  "compound_peering_request",
   "pg_advance_map",
   "pg_creation",
   "replicated_request",
@@ -62,6 +62,8 @@ static constexpr const char* const OP_NAMES[] = {
   "historic_client_request",
   "logmissing_request",
   "logmissing_request_reply",
+  "snaptrim_event",
+  "snaptrimobj_subevent",
 };
 
 // prevent the addition of OperationTypeCode-s with no matching OP_NAMES entry:
@@ -146,11 +148,22 @@ protected:
       return typename InterruptorT::template futurize_t<ret_t>{std::move(ret)};
     }
   }
+
+public:
+  static constexpr bool is_trackable = true;
 };
 
 template <class T>
 class PhasedOperationT : public TrackableOperationT<T> {
   using base_t = TrackableOperationT<T>;
+
+  T* that() {
+    return static_cast<T*>(this);
+  }
+  const T* that() const {
+    return static_cast<const T*>(this);
+  }
+
 protected:
   using TrackableOperationT<T>::TrackableOperationT;
 
@@ -159,18 +172,19 @@ protected:
     return this->template with_blocking_event<typename StageT::BlockingEvent,
 	                                      InterruptorT>(
       [&stage, this] (auto&& trigger) {
-        return handle.enter<T>(stage, std::move(trigger));
+        // delegated storing the pipeline handle to let childs to match
+        // the lifetime of pipeline with e.g. ConnectedSocket (important
+        // for ConnectionPipeline).
+        return that()->get_handle().template enter<T>(stage, std::move(trigger));
     });
   }
-
-  PipelineHandle handle;
 
   template <class OpT>
   friend class crimson::os::seastore::OperationProxyT;
 
-  // OSD::start_pg_operation needs access to enter_stage, we can make this
+  // PGShardManager::start_pg_operation needs access to enter_stage, we can make this
   // more sophisticated later on
-  friend class OSD;
+  friend class PGShardManager;
 };
 
 /**
@@ -185,7 +199,6 @@ struct OSDOperationRegistry : OperationRegistryT<
 
   void put_historic(const class ClientRequest& op);
 
-  size_t dump_client_requests(ceph::Formatter* f) const;
   size_t dump_historic_client_requests(ceph::Formatter* f) const;
   size_t dump_slowest_historic_client_requests(ceph::Formatter* f) const;
 

@@ -81,7 +81,7 @@ seastar::future<> BackgroundRecoveryT<T>::start()
   return maybe_delay.then([ref, this] {
     return this->template with_blocking_event<OperationThrottler::BlockingEvent>(
       [ref, this] (auto&& trigger) {
-      return ss.throttler.with_throttle_while(
+      return ss.with_throttle_while(
         std::move(trigger),
         this, get_scheduler_params(), [this] {
           return T::interruptor::with_interruption([this] {
@@ -172,9 +172,9 @@ PglogBasedRecovery::do_recovery()
   });
 }
 
-BackfillRecovery::BackfillRecoveryPipeline &BackfillRecovery::bp(PG &pg)
+PGPeeringPipeline &BackfillRecovery::bp(PG &pg)
 {
-  return pg.backfill_pipeline;
+  return pg.peering_request_pg_pipeline;
 }
 
 BackfillRecovery::interruptible_future<bool>

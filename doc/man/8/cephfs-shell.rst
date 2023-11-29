@@ -57,7 +57,7 @@ Options
 .. code:: bash
 
     [build]$ python3 -m venv venv && source venv/bin/activate && pip3 install cmd2
-    [build]$ source vstart_environment.sh && source venv/bin/activate && python3 ../src/tools/cephfs/cephfs-shell
+    [build]$ source vstart_environment.sh && source venv/bin/activate && python3 ../src/tools/cephfs/shell/cephfs-shell
 
 Commands
 ========
@@ -163,6 +163,24 @@ Usage :
     cat  <file>....
 
 * file - name of the file
+
+ln
+--
+
+Add a hard link to an existing file or create a symbolic link to an existing
+file or directory.
+
+Usage:
+
+    ln [options] <target> [link_name]
+
+* target - file/directory to which a link is to be created
+* link_name - link to target with the name link_name
+
+Options:
+  -s, --symbolic  Create symbolic link
+  -v, --verbose   Print name of each linked file
+  -f, --force     Force create link/symbolic link
 
 cd
 --

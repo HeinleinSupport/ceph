@@ -5,7 +5,6 @@
 
 #include "crimson/os/seastore/cache.h"
 #include "crimson/os/seastore/cached_extent.h"
-#include "crimson/os/seastore/segment_manager_group.h"
 #include "crimson/os/seastore/transaction.h"
 
 namespace crimson::os::seastore {
@@ -43,7 +42,7 @@ public:
    */
   using get_mapping_iertr = base_iertr::extend<
     crimson::ct_error::enoent>;
-  using get_mapping_ret = get_mapping_iertr::future<BackrefPinRef>;
+  using get_mapping_ret = get_mapping_iertr::future<BackrefMappingRef>;
   virtual get_mapping_ret  get_mapping(
     Transaction &t,
     paddr_t offset) = 0;
@@ -63,7 +62,7 @@ public:
    * Insert new paddr_t -> laddr_t mapping
    */
   using new_mapping_iertr = base_iertr;
-  using new_mapping_ret = new_mapping_iertr::future<BackrefPinRef>;
+  using new_mapping_ret = new_mapping_iertr::future<BackrefMappingRef>;
   virtual new_mapping_ret new_mapping(
     Transaction &t,
     paddr_t key,
@@ -83,39 +82,24 @@ public:
     Transaction &t,
     CachedExtentRef e) = 0;
 
-  virtual Cache::backref_buf_entry_query_set_t
-  get_cached_backrefs_in_range(
+  virtual Cache::backref_entry_query_mset_t
+  get_cached_backref_entries_in_range(
     paddr_t start,
     paddr_t end) = 0;
 
-  virtual Cache::backref_buf_entry_query_set_t
-  get_cached_backref_removals_in_range(
-    paddr_t start,
-    paddr_t end) = 0;
-
-  virtual const backref_buf_entry_t::set_t& get_cached_backref_removals() = 0;
-  virtual const backref_buf_entry_t::set_t& get_cached_backrefs() = 0;
-  virtual backref_buf_entry_t get_cached_backref_removal(paddr_t addr) = 0;
-
-  virtual Cache::backref_extent_buf_entry_query_set_t
-  get_cached_backref_extents_in_range(
-    paddr_t start,
-    paddr_t end) = 0;
-
-  virtual bool backref_should_be_removed(paddr_t paddr) = 0;
-
-  using retrieve_backref_extents_iertr = trans_iertr<
-    crimson::errorator<
-      crimson::ct_error::input_output_error>
-    >;
-  using retrieve_backref_extents_ret =
-    retrieve_backref_extents_iertr::future<>;
-  virtual retrieve_backref_extents_ret retrieve_backref_extents(
+  using retrieve_backref_extents_in_range_iertr = base_iertr;
+  using retrieve_backref_extents_in_range_ret =
+    retrieve_backref_extents_in_range_iertr::future<std::vector<CachedExtentRef>>;
+  virtual retrieve_backref_extents_in_range_ret
+  retrieve_backref_extents_in_range(
     Transaction &t,
-    Cache::backref_extent_buf_entry_query_set_t &&backref_extents,
-    std::vector<CachedExtentRef> &extents) = 0;
+    paddr_t start,
+    paddr_t end) = 0;
 
-  virtual void cache_new_backref_extent(paddr_t paddr, extent_types_t type) = 0;
+  virtual void cache_new_backref_extent(
+    paddr_t paddr,
+    paddr_t key,
+    extent_types_t type) = 0;
 
   /**
    * merge in-cache paddr_t -> laddr_t mappings to the on-disk backref tree
@@ -143,29 +127,21 @@ public:
     Transaction &t,
     paddr_t offset) = 0;
 
+  using check_child_trackers_ret = base_iertr::future<>;
+  virtual check_child_trackers_ret check_child_trackers(Transaction &t) = 0;
+
   /**
-   * scan all extents, including backref extents, logical extents and lba extents,
+   * scan all extents in both tree and cache,
+   * including backref extents, logical extents and lba extents,
    * visit them with scan_mapped_space_func_t
    */
-  using scan_mapped_space_iertr = base_iertr::extend_ertr<
-    SegmentManager::read_ertr>;
+  using scan_mapped_space_iertr = base_iertr;
   using scan_mapped_space_ret = scan_mapped_space_iertr::future<>;
   using scan_mapped_space_func_t = std::function<
-    void(paddr_t, extent_len_t, depth_t, extent_types_t)>;
+    void(paddr_t, paddr_t, extent_len_t, extent_types_t, laddr_t)>;
   virtual scan_mapped_space_ret scan_mapped_space(
     Transaction &t,
     scan_mapped_space_func_t &&f) = 0;
-
-  virtual void complete_transaction(
-    Transaction &t,
-    std::vector<CachedExtentRef> &to_clear,	///< extents whose pins are to be cleared,
-						//   as the results of their retirements
-    std::vector<CachedExtentRef> &to_link	///< fresh extents whose pins are to be inserted
-						//   into backref manager's pin set
-  ) = 0;
-
-  virtual void add_pin(BackrefPin &pin) = 0;
-  virtual void remove_pin(BackrefPin &pin) = 0;
 
   virtual ~BackrefManager() {}
 };
@@ -174,7 +150,6 @@ using BackrefManagerRef =
   std::unique_ptr<BackrefManager>;
 
 BackrefManagerRef create_backref_manager(
-  SegmentManagerGroup &sm_group,
   Cache &cache);
 
 } // namespace crimson::os::seastore::backref

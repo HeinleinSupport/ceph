@@ -24,7 +24,7 @@ struct ObjectDataBlock : crimson::os::seastore::LogicalCachedExtent {
   ObjectDataBlock(const ObjectDataBlock &other)
     : LogicalCachedExtent(other) {}
 
-  CachedExtentRef duplicate_for_write() final {
+  CachedExtentRef duplicate_for_write(Transaction&) final {
     return CachedExtentRef(new ObjectDataBlock(*this));
   };
 
@@ -135,3 +135,7 @@ private:
 };
 
 }
+
+#if FMT_VERSION >= 90000
+template <> struct fmt::formatter<crimson::os::seastore::ObjectDataBlock> : fmt::ostream_formatter {};
+#endif

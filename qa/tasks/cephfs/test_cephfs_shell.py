@@ -1,7 +1,7 @@
 """
 NOTE: For running this tests locally (using vstart_runner.py), export the
-path to src/tools/cephfs/cephfs-shell module to $PATH. Running
-"export PATH=$PATH:$(cd ../src/tools/cephfs && pwd)" from the build dir
+path to src/tools/cephfs/shell/cephfs-shell module to $PATH. Running
+"export PATH=$PATH:$(cd ../src/tools/cephfs/shell && pwd)" from the build dir
 will update the environment without hassles of typing the path correctly.
 """
 from io import StringIO
@@ -13,6 +13,7 @@ import math
 from time import sleep
 from tasks.cephfs.cephfs_test_case import CephFSTestCase
 from teuthology.exceptions import CommandFailedError
+from textwrap import dedent
 
 log = logging.getLogger(__name__)
 
@@ -332,6 +333,75 @@ class TestRmdir(TestCephFSShell):
                                   stdin="Valid File")
         self.run_cephfs_shell_cmd("rmdir -p " + self.dir_name)
         self.mount_a.stat(self.dir_name)
+
+
+class TestLn(TestCephFSShell):
+    dir1 = 'test_dir1'
+    dir2 = 'test_dir2'
+    dump_id = 11
+    s = 'somedata'
+    dump_file = 'dump11'
+
+    def test_soft_link_without_link_name(self):
+        self.run_cephfs_shell_cmd(f'mkdir -p {self.dir1}/{self.dir2}')
+        self.mount_a.write_file(path=f'{self.dir1}/{self.dump_file}',
+                                data=self.s)
+        self.run_cephfs_shell_script(script=dedent(f'''
+                cd /{self.dir1}/{self.dir2}
+                ln -s ../{self.dump_file}'''))
+        o = self.get_cephfs_shell_cmd_output(f'cat /{self.dir1}/{self.dir2}'
+                                             f'/{self.dump_file}')
+        self.assertEqual(self.s, o)
+
+    def test_soft_link_with_link_name(self):
+        self.run_cephfs_shell_cmd(f'mkdir -p {self.dir1}/{self.dir2}')
+        self.mount_a.write_file(path=f'{self.dir1}/{self.dump_file}',
+                                data=self.s)
+        self.run_cephfs_shell_cmd(f'ln -s /{self.dir1}/{self.dump_file} '
+                                  f'/{self.dir1}/{self.dir2}/')
+        o = self.get_cephfs_shell_cmd_output(f'cat /{self.dir1}/{self.dir2}'
+                                             f'/{self.dump_file}')
+        self.assertEqual(self.s, o)
+
+    def test_hard_link_without_link_name(self):
+        self.run_cephfs_shell_cmd(f'mkdir -p {self.dir1}/{self.dir2}')
+        self.mount_a.write_file(path=f'{self.dir1}/{self.dump_file}',
+                                data=self.s)
+        self.run_cephfs_shell_script(script=dedent(f'''
+                cd /{self.dir1}/{self.dir2}
+                ln ../{self.dump_file}'''))
+        o = self.get_cephfs_shell_cmd_output(f'cat /{self.dir1}/{self.dir2}'
+                                             f'/{self.dump_file}')
+        self.assertEqual(self.s, o)
+
+    def test_hard_link_with_link_name(self):
+        self.run_cephfs_shell_cmd(f'mkdir -p {self.dir1}/{self.dir2}')
+        self.mount_a.write_file(path=f'{self.dir1}/{self.dump_file}',
+                                data=self.s)
+        self.run_cephfs_shell_cmd(f'ln /{self.dir1}/{self.dump_file} '
+                                  f'/{self.dir1}/{self.dir2}/')
+        o = self.get_cephfs_shell_cmd_output(f'cat /{self.dir1}/{self.dir2}'
+                                             f'/{self.dump_file}')
+        self.assertEqual(self.s, o)
+
+    def test_hard_link_to_dir_not_allowed(self):
+        self.run_cephfs_shell_cmd(f'mkdir {self.dir1}')
+        self.run_cephfs_shell_cmd(f'mkdir {self.dir2}')
+        r = self.run_cephfs_shell_cmd(f'ln /{self.dir1} /{self.dir2}/',
+                                      check_status=False)
+        self.assertEqual(r.returncode, 3)
+
+    def test_target_exists_in_dir(self):
+        self.mount_a.write_file(path=f'{self.dump_file}', data=self.s)
+        r = self.run_cephfs_shell_cmd(f'ln {self.dump_file} {self.dump_file}',
+                                      check_status=False)
+        self.assertEqual(r.returncode, 1)
+
+    def test_incorrect_dir(self):
+        self.mount_a.write_file(path=f'{self.dump_file}', data=self.s)
+        r = self.run_cephfs_shell_cmd(f'ln {self.dump_file} /dir1/',
+                                      check_status=False)
+        self.assertEqual(r.returncode, 5)
 
 
 class TestGetAndPut(TestCephFSShell):
@@ -794,18 +864,18 @@ class TestQuota(TestCephFSShell):
 
     def test_set(self):
         self.create_dir()
-        set_values = ('6', '2')
+        set_values = ('4096', '2')
         self.assertTupleEqual(self.set_and_get_quota_vals(set_values),
                               set_values)
 
     def test_replace_values(self):
         self.test_set()
-        set_values = ('20', '4')
+        set_values = ('8192', '4')
         self.assertTupleEqual(self.set_and_get_quota_vals(set_values),
                               set_values)
 
     def test_set_invalid_dir(self):
-        set_values = ('5', '5')
+        set_values = ('4096', '5')
         try:
             self.assertTupleEqual(self.set_and_get_quota_vals(
                 set_values, False), set_values)
@@ -850,9 +920,8 @@ class TestQuota(TestCephFSShell):
         filename = 'test_file'
         file_abspath = path.join(dir_abspath, filename)
         try:
-            # Write should fail as bytes quota is set to 6
-            self.mount_a.client_remote.write_file(file_abspath,
-                                                  'Disk raise Exception')
+            # Write should fail as bytes quota is set to 4096
+            self.mount_a.write_n_mb(file_abspath, 1)
             raise Exception("Write should have failed")
         except CommandFailedError:
             # Test should pass only when write command fails

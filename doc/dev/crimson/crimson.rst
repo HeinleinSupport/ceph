@@ -24,6 +24,46 @@ cloned using git.
 
 .. _ASan: https://github.com/google/sanitizers/wiki/AddressSanitizer
 
+Testing crimson with cephadm
+===============================
+
+The Ceph CI/CD pipeline includes ceph container builds with
+crimson-osd subsitituted for ceph-osd.
+
+Once a branch at commit <sha1> has been built and is available in
+shaman, you can deploy it using the cephadm instructions outlined
+in :ref:`cephadm` with the following adaptations.
+
+First, while performing the initial bootstrap, use the --image flag to
+use a crimson build rather than a default build:
+
+.. prompt:: bash #
+
+   cephadm --image quay.ceph.io/ceph-ci/ceph:<sha1>-crimson --allow-mismatched-release bootstrap ...
+
+You'll likely need to include the --allow-mismatched-release flag to
+use a non-release branch.
+
+Additionally, prior to deploying the osds, you'll need enable crimson
+and default pools to be created as crimson pools (from cephadm shell):
+
+.. prompt:: bash #
+
+   ceph config set global 'enable_experimental_unrecoverable_data_corrupting_features' crimson
+   ceph osd set-allow-crimson --yes-i-really-mean-it
+   ceph config set mon osd_pool_default_crimson true
+
+The first command enables the crimson experimental feature.  Crimson
+is highly experimental, and malfunctions up to and including crashes
+and data loss are to be expected.
+
+The second enables the allow_crimson OSDMap flag.  The monitor will
+not allow crimson-osd to boot without that flag.
+
+The last causes pools to be created by default with the crimson flag.
+crimson pools are restricted to operations supported by crimson.
+crimson-osd won't instantiate pgs from non-crimson pools.
+
 Running Crimson
 ===============
 
@@ -114,16 +154,16 @@ To facilitate the development of crimson, following options would be handy when
 using ``vstart.sh``,
 
 ``--crimson``
-    start ``crimson-osd`` instead of ``ceph-osd``
+    Start ``crimson-osd`` instead of ``ceph-osd``.
 
 ``--nodaemon``
-    do not daemonize the service
+    Do not daemonize the service.
 
 ``--redirect-output``
-    redirect the stdout and stderr of service to ``out/$type.$num.stdout``.
+    Tedirect the stdout and stderr of service to ``out/$type.$num.stdout``.
 
 ``--osd-args``
-    pass extra command line options to crimson-osd or ceph-osd. It's quite
+    Pass extra command line options to crimson-osd or ceph-osd. It's quite
     useful for passing Seastar options to crimson-osd. For instance, you could
     use ``--osd-args "--memory 2G"`` to set the memory to use. Please refer
     the output of::
@@ -133,14 +173,34 @@ using ``vstart.sh``,
     for more Seastar specific command line options.
 
 ``--cyanstore``
-    use the CyanStore as the object store backend.
+    Use CyanStore as the object store backend.
 
 ``--bluestore``
-    use the alienized BlueStore as the object store backend. This is the default
+    Use the alienized BlueStore as the object store backend. This is the default
     setting, if not specified otherwise.
 
 ``--memstore``
-    use the alienized MemStore as the object store backend.
+    Use the alienized MemStore as the object store backend.
+
+``--seastore``
+    Use SeaStore as the back end object store.
+
+``--seastore-devs``
+    Specify the block device used by SeaStore.
+
+``--seastore-secondary-devs``
+    Optional.  SeaStore supports multiple devices.  Enable this feature by
+    passing the block device to this option.
+
+``--seastore-secondary-devs-type``
+    Optional.  Specify device type of secondary devices.  When the secondary
+    device is slower than main device passed to ``--seastore-devs``, the cold
+    data in faster device will be evicted to the slower devices over time.
+    Valid types include ``HDD``, ``SSD``(default), ``ZNS``, and ``RANDOM_BLOCK_SSD``
+    Note secondary devices should not be faster than the main device.
+
+``--seastore``
+    use SeaStore as the object store backend.
 
 So, a typical command to start a single-crimson-node cluster is::
 
@@ -150,6 +210,15 @@ So, a typical command to start a single-crimson-node cluster is::
     --osd-args "--memory 4G"
 
 Where we assign 4 GiB memory, a single thread running on core-0 to crimson-osd.
+
+Another SeaStore example::
+
+  $  MGR=1 MON=1 OSD=1 MDS=0 RGW=0 ../src/vstart.sh -n -x \
+    --without-dashboard --seastore \
+    --crimson --redirect-output \
+    --seastore-devs /dev/sda \
+    --seastore-secondary-devs /dev/sdb \
+    --seastore-secondary-devs-type HDD
 
 You could stop the vstart cluster using::
 
@@ -335,7 +404,7 @@ Debugging with GDB
 
 The `tips`_ for debugging Scylla also apply to Crimson.
 
-.. _tips: https://github.com/scylladb/scylla/blob/master/docs/guides/debugging.md#tips-and-tricks
+.. _tips: https://github.com/scylladb/scylla/blob/master/docs/dev/debugging.md#tips-and-tricks
 
 Human-readable backtraces with addr2line
 ----------------------------------------

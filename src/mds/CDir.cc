@@ -29,8 +29,10 @@
 #include "MDLog.h"
 #include "LogSegment.h"
 #include "MDBalancer.h"
+#include "SnapClient.h"
 
 #include "common/bloom_filter.hpp"
+#include "common/likely.h"
 #include "include/Context.h"
 #include "common/Clock.h"
 
@@ -373,6 +375,9 @@ CDentry* CDir::add_null_dentry(std::string_view dname,
    
   // create dentry
   CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), "", first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) {
     dn->state_set(CDentry::STATE_AUTH);
     mdcache->lru.lru_insert_mid(dn);
@@ -380,9 +385,6 @@ CDentry* CDir::add_null_dentry(std::string_view dname,
     mdcache->bottom_lru.lru_insert_mid(dn);
     dn->state_set(CDentry::STATE_BOTTOMLRU);
   }
-
-  dn->dir = this;
-  dn->version = get_projected_version();
   
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
@@ -419,6 +421,9 @@ CDentry* CDir::add_primary_dentry(std::string_view dname, CInode *in,
   
   // create dentry
   CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), std::move(alternate_name), first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) 
     dn->state_set(CDentry::STATE_AUTH);
   if (is_auth() || !inode->is_stray()) {
@@ -428,9 +433,6 @@ CDentry* CDir::add_primary_dentry(std::string_view dname, CInode *in,
     dn->state_set(CDentry::STATE_BOTTOMLRU);
   }
 
-  dn->dir = this;
-  dn->version = get_projected_version();
-  
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
   //assert(null_items.count(dn->get_name()) == 0);
@@ -469,12 +471,12 @@ CDentry* CDir::add_remote_dentry(std::string_view dname, inodeno_t ino, unsigned
 
   // create dentry
   CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), std::move(alternate_name), ino, d_type, first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) 
     dn->state_set(CDentry::STATE_AUTH);
   mdcache->lru.lru_insert_mid(dn);
-
-  dn->dir = this;
-  dn->version = get_projected_version();
   
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
@@ -828,7 +830,9 @@ void CDir::try_remove_dentries_for_stray()
 
 bool CDir::try_trim_snap_dentry(CDentry *dn, const set<snapid_t>& snaps)
 {
-  ceph_assert(dn->last != CEPH_NOSNAP);
+  if (dn->last == CEPH_NOSNAP) {
+    return false;
+  }
   set<snapid_t>::const_iterator p = snaps.lower_bound(dn->first);
   CDentry::linkage_t *dnl= dn->get_linkage();
   CInode *in = 0;
@@ -848,23 +852,6 @@ bool CDir::try_trim_snap_dentry(CDentry *dn, const set<snapid_t>& snaps)
     return true;
   }
   return false;
-}
-
-
-void CDir::purge_stale_snap_data(const set<snapid_t>& snaps)
-{
-  dout(10) << __func__ << " " << snaps << dendl;
-
-  auto p = items.begin();
-  while (p != items.end()) {
-    CDentry *dn = p->second;
-    ++p;
-
-    if (dn->last == CEPH_NOSNAP)
-      continue;
-
-    try_trim_snap_dentry(dn, snaps);
-  }
 }
 
 
@@ -1963,6 +1950,7 @@ CDentry *CDir::_load_dentry(
 
         if (!undef_inode) {
           mdcache->add_inode(in); // add
+	  mdcache->insert_taken_inos(in->ino());
           dn = add_primary_dentry(dname, in, std::move(alternate_name), first, last); // link
         }
         dout(12) << "_fetched  got " << *dn << " " << *in << dendl;
@@ -2431,6 +2419,13 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
   auto commit_one = [&](bool header=false) {
     ObjectOperation op;
 
+    /*
+     * Shouldn't submit empty op to Rados, which could cause
+     * the cephfs to become readonly.
+     */
+    ceph_assert(header || !_set.empty() || !_rm.empty());
+
+
     // don't create new dirfrag blindly
     if (!_new)
       op.stat(nullptr, nullptr, nullptr);
@@ -2466,7 +2461,7 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
   int count = 0;
   for (auto &key : stales) {
     unsigned size = key.length() + sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
@@ -2478,7 +2473,7 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
 
   for (auto &key : to_remove) {
     unsigned size = key.length() + sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
@@ -2506,7 +2501,7 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
     }
 
     unsigned size = item.key.length() + bl.length() + 2 * sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
@@ -2565,8 +2560,11 @@ void CDir::_omap_commit(int op_prio)
     string key;
     dn->key().encode(key);
 
-    if (dn->last != CEPH_NOSNAP &&
-	snaps && try_trim_snap_dentry(dn, *snaps)) {
+    if (!dn->corrupt_first_loaded) {
+      dn->check_corruption(false);
+    }
+
+    if (snaps && try_trim_snap_dentry(dn, *snaps)) {
       dout(10) << " rm " << key << dendl;
       to_remove.emplace_back(std::move(key));
       return;
@@ -3753,6 +3751,7 @@ bool CDir::scrub_local()
   if (!good && scrub_infop->header->get_repair()) {
     mdcache->repair_dirfrag_stats(this);
     scrub_infop->header->set_repaired();
+    good = true;
   }
   return good;
 }
@@ -3804,7 +3803,7 @@ bool CDir::should_merge() const
       return false;
   }
 
-  return (int)get_frag_size() < g_conf()->mds_bal_merge_size;
+  return ((int)get_frag_size() + (int)get_num_snap_items()) < g_conf()->mds_bal_merge_size;
 }
 
 MEMPOOL_DEFINE_OBJECT_FACTORY(CDir, co_dir, mds_co);

@@ -49,8 +49,9 @@ bool operator<(const std::vector<rgw_bucket_shard_sync_info>& lhs,
 
 bool empty(const BucketIndexShardsManager& markers, int size)
 {
+  static const std::string empty_string;
   for (int i = 0; i < size; ++i) {
-    const auto& m = markers.get(i, "");
+    const auto& m = markers.get(i, empty_string);
     if (!m.empty()) {
       return false;
     }
@@ -240,9 +241,8 @@ int rgw_bucket_sync_checkpoint(const DoutPrefixProvider* dpp,
     // fetch source bucket info
     spawn::spawn(ioctx, [&] (yield_context yield) {
       auto y = optional_yield{ioctx, yield};
-      auto obj_ctx = store->svc()->sysobj->init_obj_ctx();
       int r = store->getRados()->get_bucket_instance_info(
-          obj_ctx, *entry.pipe.source.bucket, entry.source_bucket_info,
+          *entry.pipe.source.bucket, entry.source_bucket_info,
           nullptr, nullptr, y, dpp);
       if (r < 0) {
         ldpp_dout(dpp, 0) << "failed to read source bucket info: "
