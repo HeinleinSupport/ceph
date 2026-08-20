@@ -87,6 +87,8 @@ RUN set -eux; \
     source /etc/ceph-distro.env; \
     if [[ "${DIST_PATH}" == rocky/* ]]; then \
         curl -fs -L "https://shaman.ceph.com/api/repos/nfs-ganesha/main/latest/${DIST_PATH}/repo?arch=$(arch)" -o /etc/yum.repos.d/ganesha.repo; \
+    elif [[ "${DIST_PATH}" == "almalinux/10" ]]; then \
+        curl -fs -L "https://shaman.ceph.com/api/repos/nfs-ganesha/main/latest/rocky/10/repo?arch=$(arch)" -o /etc/yum.repos.d/ganesha.repo; \
     else \
       { \
         printf '%s\n' '[ganesha]'; \
