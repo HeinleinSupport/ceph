@@ -102,15 +102,17 @@ RUN set -eux; \
 # ISCSI repo
 RUN set -eux && \
     source /etc/ceph-distro.env && \
-    curl -s -L https://shaman.ceph.com/api/repos/tcmu-runner/main/latest/${DIST_PATH}/repo?arch=$(arch) -o /etc/yum.repos.d/tcmu-runner.repo && \
-    case "${CEPH_REF}" in \
-        quincy|reef) \
-            curl -fs -L https://download.ceph.com/ceph-iscsi/3/rpm/${EL_VER}/ceph-iscsi.repo -o /etc/yum.repos.d/ceph-iscsi.repo ;\
-            ;;\
-        main|*) \
-            curl -fs -L https://shaman.ceph.com/api/repos/ceph-iscsi/main/latest/${DIST_PATH}/repo -o /etc/yum.repos.d/ceph-iscsi.repo ;\
-            ;;\
-    esac
+    if [[ "${DIST_PATH}" == rocky/* ]]; then \
+        curl -s -L https://shaman.ceph.com/api/repos/tcmu-runner/main/latest/${DIST_PATH}/repo?arch=$(arch) -o /etc/yum.repos.d/tcmu-runner.repo && \
+        case "${CEPH_REF}" in \
+            quincy|reef) \
+                curl -fs -L https://download.ceph.com/ceph-iscsi/3/rpm/${EL_VER}/ceph-iscsi.repo -o /etc/yum.repos.d/ceph-iscsi.repo ;\
+                ;;\
+            main|*) \
+                curl -fs -L https://shaman.ceph.com/api/repos/ceph-iscsi/main/latest/${DIST_PATH}/repo -o /etc/yum.repos.d/ceph-iscsi.repo ;\
+                ;;\
+        esac; \
+    fi
 
 # Ceph repo
 RUN --mount=type=secret,id=prerelease_creds set -ex && \
@@ -215,7 +217,9 @@ rpcbind \
 sssd-client" >> packages.txt
 
 # ISCSI
-RUN echo "ceph-iscsi tcmu-runner python3-rtslib" >> packages.txt
+RUN if [[ "${DIST_PATH}" == rocky/* ]]; then \
+    echo "ceph-iscsi tcmu-runner python3-rtslib" >> packages.txt ; \
+fi
 
 # Ceph-CSI
 # TODO: coordinate with @Madhu-1 to have Ceph-CSI install these itself if unused by ceph
