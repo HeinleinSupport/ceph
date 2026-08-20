@@ -34,7 +34,7 @@ CI_CONTAINER: ${CI_CONTAINER}"
 
 # Other labels are set automatically by container/build github action
 # See: https://github.com/opencontainers/image-spec/blob/main/annotations.md
-LABEL org.opencontainers.image.authors="Ceph Release Team <ceph-maintainers@ceph.io>" \
+LABEL org.opencontainers.image.authors="Robert Sander <r.sander@heinlein-support.de>" \
       org.opencontainers.image.documentation="https://docs.ceph.com/"
 
 LABEL \
