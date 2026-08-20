@@ -260,6 +260,9 @@ RUN \
     grep -sqo "udev_rules = 0" /etc/lvm/lvm.conf && \
     grep -sqo "obtain_device_list_from_udev = 0" /etc/lvm/lvm.conf
 
+RUN dnf install -y python3-pip python3-pytz python3-msgpack; \
+    pip --disable-pip-version-check install influxdb
+
 # CLEAN UP!
 RUN set -ex && \
     dnf clean all && \
