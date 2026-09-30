@@ -102,6 +102,14 @@ add_executable(unittest_rgw_bencode test_rgw_bencode.cc)
 add_ceph_unittest(unittest_rgw_bencode)
 target_link_libraries(unittest_rgw_bencode ${rgw_libs})
 
+# unittest_rgw_cors
+add_executable(unittest_rgw_cors
+  test_rgw_cors.cc
+  $<TARGET_OBJECTS:unit-main>)
+add_ceph_unittest(unittest_rgw_cors)
+target_link_libraries(unittest_rgw_cors ${rgw_libs})
+
+
 # unittest_rgw_bucket_sync_cache
 add_executable(unittest_rgw_bucket_sync_cache test_rgw_bucket_sync_cache.cc)
 add_ceph_unittest(unittest_rgw_bucket_sync_cache)
@@ -118,6 +126,13 @@ add_executable(unittest_rgw_compression
   $<TARGET_OBJECTS:unit-main>)
 add_ceph_unittest(unittest_rgw_compression)
 target_link_libraries(unittest_rgw_compression ${rgw_libs})
+
+# unittest_rgw_cache
+add_executable(unittest_rgw_cache
+  test_rgw_cache.cc
+  $<TARGET_OBJECTS:unit-main>)
+add_ceph_unittest(unittest_rgw_cache)
+target_link_libraries(unittest_rgw_cache ${rgw_libs})
 
 # unittest_http_manager
 add_executable(unittest_http_manager test_http_manager.cc)
@@ -251,6 +266,12 @@ add_executable(unittest_rgw_string test_rgw_string.cc)
 add_ceph_unittest(unittest_rgw_string)
 target_include_directories(unittest_rgw_string
   SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
+
+add_executable(unittest_rgw_http_errors test_rgw_http_errors.cc)
+add_ceph_unittest(unittest_rgw_http_errors)
+target_include_directories(unittest_rgw_http_errors
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
+target_link_libraries(unittest_rgw_http_errors rgw_common ${UNITTEST_LIBS})
 
 # unittest_rgw_dmclock_queue
 add_executable(unittest_rgw_dmclock_scheduler test_rgw_dmclock_scheduler.cc $<TARGET_OBJECTS:unit-main>)
@@ -413,3 +434,8 @@ target_link_libraries(unittest_rgw_asio_frontend_connection ${rgw_libs} ${UNITTE
 add_executable(unittest_rgw_tag test_rgw_tag.cc)
 add_ceph_unittest(unittest_rgw_tag)
 target_link_libraries(unittest_rgw_tag ${rgw_libs} ${UNITTEST_LIBS})
+
+# unittest_rgw_auth_sigv4
+add_executable(unittest_rgw_auth_sigv4 test_rgw_auth_sigv4.cc)
+add_ceph_unittest(unittest_rgw_auth_sigv4)
+target_link_libraries(unittest_rgw_auth_sigv4 ${rgw_libs} ${UNITTEST_LIBS})
